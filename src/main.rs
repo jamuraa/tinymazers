@@ -11,7 +11,9 @@ use elefren::helpers::cli;
 use elefren::helpers::toml;
 use elefren::prelude::*;
 
-#[derive(Clone, Copy, Debug)]
+use argh::FromArgs;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Pixel(usize, usize);
 
 impl Pixel {
@@ -196,6 +198,60 @@ impl Board {
         }
         res
     }
+
+    /// This algorithm makes some mazes with unfortunate rotational symmetry.
+    /// Returns a 'vane score', which is 12 or 16 based on whether there are three
+    /// or four paths from here that take two steps, then a right turn, and at least two
+    /// steps.
+    /// Currently only works on a board where empty spaces are '.'
+    fn has_unfortunate_rotational_symmetry(&self) -> usize {
+        let blanks = self.blanks();
+        let in_blanks = |p: &Pixel| blanks.iter().find(|px| p == *px).is_some();
+        self.blanks()
+            .clone()
+            .into_iter()
+            .find_map(|p| {
+                if p.0 < 2 || p.1 < 2 {
+                    return None;
+                }
+                let vanes_counts: Vec<_> = [
+                    [
+                        Pixel(p.0 - 1, p.1),
+                        Pixel(p.0 - 2, p.1),
+                        Pixel(p.0 - 2, p.1 + 1),
+                        Pixel(p.0 - 2, p.1 + 2),
+                    ],
+                    [
+                        Pixel(p.0 + 1, p.1),
+                        Pixel(p.0 + 2, p.1),
+                        Pixel(p.0 + 2, p.1 - 1),
+                        Pixel(p.0 + 2, p.1 - 2),
+                    ],
+                    [
+                        Pixel(p.0, p.1 - 1),
+                        Pixel(p.0, p.1 - 2),
+                        Pixel(p.0 - 1, p.1 - 2),
+                        Pixel(p.0 - 2, p.1 - 2),
+                    ],
+                    [
+                        Pixel(p.0, p.1 + 1),
+                        Pixel(p.0, p.1 + 2),
+                        Pixel(p.0 + 1, p.1 + 2),
+                        Pixel(p.0 + 2, p.1 + 2),
+                    ],
+                ]
+                .into_iter()
+                .map(|vane| {
+                    let vane_count = vane.iter().filter(|p| in_blanks(*p)).count();
+                    (vane_count > 3).then_some(vane_count).unwrap_or(0)
+                })
+                .collect();
+                println!("{vanes_counts:?}");
+                let score = vanes_counts.iter().sum();
+                (score >= 12).then_some(score)
+            })
+            .unwrap_or(0)
+    }
 }
 
 impl core::fmt::Display for Board {
@@ -304,10 +360,13 @@ fn find_crossings(b: &Board) -> VecDeque<Crossing> {
         .collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum Tileset {
     Garden,
     City,
+    // Winter is for only part of the year, and not always used.
+    #[allow(dead_code)]
+    Winter,
     // Spoopy is for near holidays and not always used.
     #[allow(dead_code)]
     Spoopy,
@@ -319,6 +378,8 @@ impl Tileset {
     const GARDEN_TILES: &'static [char] = &[
         '🍄', '🌳', '🌲', '🌻', '⛲', '🌳', '🌳', '🌲', '🌲', '🌳', '🌳', '🌲', '🌲',
     ];
+    // Snowman, Yule Tree x2, Evergreen x2, Gift, Mountain x2, Snowflake x2
+    const WINTER_TILES: &'static [char] = &['☃', '🎄', '🎄', '🌲', '🌲', '🎁', '🏔', '🏔', '❄', '❄'];
     // Just a moon
     const MOON_TILES: &'static [char] = &['🌑'];
     // School, Office, Hospital, Bank, Hotel, Euro Post Office, Department Store, Factory,
@@ -331,6 +392,7 @@ impl Tileset {
 
     fn pick<R: Rng + ?Sized>(&self, rng: &mut R) -> char {
         let tiles = match self {
+            Self::Winter => Self::WINTER_TILES,
             Self::Garden => Self::GARDEN_TILES,
             Self::City => Self::CITY_TILES,
             Self::Spoopy => Self::SPOOPY_TILES,
@@ -347,7 +409,7 @@ impl Distribution<Tileset> for Standard {
             // rand 0.8
             0 => Tileset::Garden,
             1 => Tileset::City,
-            2 => Tileset::Garden,
+            2 => Tileset::Winter,
             _ => Tileset::Moons,
         }
     }
@@ -369,40 +431,65 @@ fn cli_register() -> Result<Mastodon, Box<dyn Error>> {
     Ok(mastodon)
 }
 
+/// Make some random tiny mazes.
+#[derive(FromArgs)]
+struct Options {
+    /// turn on to post to a Mastodon server
+    #[argh(switch, short = 'p')]
+    post: bool,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let options: Options = argh::from_env();
     let mut board = Board::make_waffle(11, 11);
-
-    open_startend(&mut board);
-    fill_trees(&mut board, 'A' as usize);
-    let mut crossings = find_crossings(&board);
-    let mut rng = rand::thread_rng();
-    crossings.make_contiguous().shuffle(&mut rng);
-    while let Some(crossing) = crossings.pop_front() {
-        board.set(crossing.point, crossing.to);
-        crossings = crossings
-            .into_iter()
-            .filter_map(|x| x.reconcile(crossing.from, crossing.to))
-            .collect();
-    }
-
-    board.empty_non_walls();
-    let mastodon = match toml::from_file("mastodon.toml") {
-        Ok(data) => Mastodon::from(data),
-        Err(_) => cli_register()?,
-    };
 
     let tileset = rand::random();
 
+    while {
+        open_startend(&mut board);
+        fill_trees(&mut board, 'A' as usize);
+        let mut crossings = find_crossings(&board);
+        let mut rng = rand::thread_rng();
+        crossings.make_contiguous().shuffle(&mut rng);
+        while let Some(crossing) = crossings.pop_front() {
+            board.set(crossing.point, crossing.to);
+            crossings = crossings
+                .into_iter()
+                .filter_map(|x| x.reconcile(crossing.from, crossing.to))
+                .collect();
+        }
+
+        board.empty_non_walls();
+        let score = board.has_unfortunate_rotational_symmetry();
+        if score >= 12 {
+            let toot = board.as_emoji(tileset);
+            println!("Unfortunately, {score} rotationally:");
+            println!("{toot}");
+        }
+        score >= 12
+    }
+    /* reset the board */
+    {
+        board = Board::make_waffle(11, 11);
+    }
+
     let toot = board.as_emoji(tileset);
 
-    let status = StatusBuilder::new()
-        .status(toot.clone())
-        .visibility(elefren::status_builder::Visibility::Public)
-        .build()?;
+    if options.post {
+        let mastodon = match toml::from_file("mastodon.toml") {
+            Ok(data) => Mastodon::from(data),
+            Err(_) => cli_register()?,
+        };
 
-    let _posted = mastodon.new_status(status)?;
+        let status = StatusBuilder::new()
+            .status(toot.clone())
+            .visibility(elefren::status_builder::Visibility::Public)
+            .build()?;
 
-    println!("Posted:");
+        let _posted = mastodon.new_status(status)?;
+
+        println!("Posted:");
+    }
     println!("{toot}");
 
     Ok(())
