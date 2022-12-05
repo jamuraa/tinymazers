@@ -1,6 +1,8 @@
-use std::error::Error;
+use color_eyre::{eyre::eyre, eyre::Report};
+
 use std::iter::repeat;
 use std::iter::zip;
+use std::str::FromStr;
 
 use std::collections::VecDeque;
 
@@ -177,12 +179,12 @@ impl Board {
 
     fn as_emoji(&self, tiles: Tileset) -> String {
         let mut rng = rand::thread_rng();
-        let emoji_board: Vec<char> = self
+        let emoji_board: Vec<&'static str> = self
             .board
             .iter()
             .map(|x| {
                 if x != &'x' {
-                    '🌕'
+                    "🌕"
                 } else {
                     tiles.pick(&mut rng)
                 }
@@ -193,7 +195,14 @@ impl Board {
             let start = self.index(row, 0).unwrap();
             let end = self.index(row, self.cols - 1).unwrap();
             res.push_str(
-                format!("{}\n", &emoji_board[start..=end].iter().collect::<String>()).as_str(),
+                format!(
+                    "{}\n",
+                    &emoji_board[start..=end]
+                        .iter()
+                        .map(|c| *c)
+                        .collect::<String>()
+                )
+                .as_str(),
             );
         }
         res
@@ -246,7 +255,6 @@ impl Board {
                     (vane_count > 3).then_some(vane_count).unwrap_or(0)
                 })
                 .collect();
-                println!("{vanes_counts:?}");
                 let score = vanes_counts.iter().sum();
                 (score >= 12).then_some(score)
             })
@@ -375,22 +383,25 @@ enum Tileset {
 
 impl Tileset {
     // Mushroom, Tree, Evergreen,, Sunflower, Fountain, Tree x 4, Evergreen x 4
-    const GARDEN_TILES: &'static [char] = &[
-        '🍄', '🌳', '🌲', '🌻', '⛲', '🌳', '🌳', '🌲', '🌲', '🌳', '🌳', '🌲', '🌲',
+    const GARDEN_TILES: &'static [&'static str] = &[
+        "🍄", "🌳", "🌲", "🌻", "⛲", "🌳", "🌳", "🌲", "🌲", "🌳", "🌳", "🌲", "🌲",
     ];
-    // Snowman, Yule Tree x2, Evergreen x2, Gift, Mountain x2, Snowflake x2
-    const WINTER_TILES: &'static [char] = &['☃', '🎄', '🎄', '🌲', '🌲', '🎁', '🏔', '🏔', '❄', '❄'];
+    // Snowman, Yule Tree x2, Evergreen x6, Gift, Mountain x2, Snowflake x2
+    const WINTER_TILES: &'static [&'static str] = &[
+        "☃️", "🎁", "🏔", "🏔", "❄️", "❄️", "🎄", "🎄", "🌲", "🌲", "🌲", "🌲", "🌲", "🌲",
+    ];
     // Just a moon
-    const MOON_TILES: &'static [char] = &['🌑'];
+    const MOON_TILES: &'static [&'static str] = &["🌑"];
     // School, Office, Hospital, Bank, Hotel, Euro Post Office, Department Store, Factory,
     // Construction, Cityscape
-    const CITY_TILES: &'static [char] = &['🏫', '🏢', '🏥', '🏦', '🏨', '🏤', '🏬', '🏭', '🏗', '🏙'];
+    const CITY_TILES: &'static [&'static str] =
+        &["🏫", "🏢", "🏥", "🏦", "🏨", "🏤", "🏬", "🏭", "🏗", "🏙"];
     // Corn, Spider, Jack o lantern, Bath,  Spiderweb, Ghost, Skull, Seedling x 5
-    const SPOOPY_TILES: &'static [char] = &[
-        '🌽', '🕷', '🎃', '🦇', '🕸', '👻', '💀', '🌱', '🌱', '🌱', '🌱', '🌱',
+    const SPOOPY_TILES: &'static [&'static str] = &[
+        "🌽", "🕷", "🎃", "🦇", "🕸", "👻", "💀", "🌱", "🌱", "🌱", "🌱", "🌱",
     ];
 
-    fn pick<R: Rng + ?Sized>(&self, rng: &mut R) -> char {
+    fn pick<R: Rng + ?Sized>(&self, rng: &mut R) -> &'static str {
         let tiles = match self {
             Self::Winter => Self::WINTER_TILES,
             Self::Garden => Self::GARDEN_TILES,
@@ -400,6 +411,21 @@ impl Tileset {
         };
 
         *(tiles.choose(rng).unwrap())
+    }
+}
+
+impl FromStr for Tileset {
+    type Err = Report;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "winter" => Ok(Self::Winter),
+            "garden" => Ok(Self::Garden),
+            "city" => Ok(Self::City),
+            "spoopy" => Ok(Self::Spoopy),
+            "moons" => Ok(Self::Moons),
+            _ => Err(eyre!("Failed to parse {s} into a Tileset")),
+        }
     }
 }
 
@@ -415,7 +441,7 @@ impl Distribution<Tileset> for Standard {
     }
 }
 
-fn cli_register() -> Result<Mastodon, Box<dyn Error>> {
+fn cli_register() -> color_eyre::Result<Mastodon> {
     use elefren::scopes::*;
     let scopes = Scopes::write(Write::Statuses).and(Scopes::read_all());
 
@@ -437,13 +463,17 @@ struct Options {
     /// turn on to post to a Mastodon server
     #[argh(switch, short = 'p')]
     post: bool,
+    /// pick a specific tlieset
+    #[argh(option)]
+    tileset: Option<Tileset>,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
     let options: Options = argh::from_env();
     let mut board = Board::make_waffle(11, 11);
 
-    let tileset = rand::random();
+    let tileset = options.tileset.unwrap_or(rand::random());
 
     while {
         open_startend(&mut board);
